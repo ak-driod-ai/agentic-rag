@@ -1,0 +1,41 @@
+NOVATECH / NOVARETAIL INTERNAL IT HANDBOOK & EMPLOYEE POLICY
+
+1. COMPANY OVERVIEW & IDENTITY
+Novatech Solutions (also operating as NovaRetail) is a global technology and retail operations company. This internal document outlines standard IT operating procedures, security protocols, hardware guidelines, and support processes for all employees and contractors.
+
+2. VPN POLICY & REMOTE ACCESS
+- NovaRetail / Novatech employees working remotely must use the approved "RemoteConnect VPN" client.
+- Employees must sign in using their corporate email (@novatech.com / @novaretail.com) and complete Multi-Factor Authentication (MFA).
+- If RemoteConnect fails:
+  a. Verify active internet connectivity.
+  b. Confirm the registered MFA authenticator device is operational.
+  c. Restart the RemoteConnect client application.
+  d. If the issue persists, submit a ticket to the NovaRetail IT Service Desk.
+
+3. PASSWORD & CREDENTIAL MANAGEMENT
+- Passwords must be at least 14 characters long and contain uppercase, lowercase, numbers, and special symbols.
+- Passwords must never be shared, written down, or transmitted over unencrypted chat channels.
+- Corporate passwords expire every 90 days.
+- If an employee forgets their password, they must use the approved Self-Service Password Reset (SSPR) portal at https://sso.novatech-internal.com/reset.
+
+4. MULTI-FACTOR AUTHENTICATION (MFA)
+- MFA is strictly mandatory for all remote access, email access, and protected corporate systems.
+- Supported MFA methods: Novatech Authenticator App (Push Notification), Hardware Security Keys (YubiKey). SMS OTP is deprecated and not permitted for internal systems.
+
+5. HARDWARE & SOFTWARE POLICIES
+- Employees must only install software from the Novatech Self-Service App Catalog (e.g., Slack, VS Code, Zoom, Docker Enterprise).
+- Unapproved third-party software, peer-to-peer applications, and unauthorized browser extensions must not be installed on company-managed laptops.
+- Laptop Troubleshooting:
+  - If a company laptop is experiencing performance degradation or freezing, restart the device and check Activity Monitor / Task Manager for high-CPU rogue processes.
+  - If laptop battery health drops below 75% or overheating occurs, request a hardware replacement via the IT Portal.
+
+6. IT SERVICE DESK & ESCALATION
+- Working Hours: 24/7 Global IT Support for critical outages; 8:00 AM - 8:00 PM EST for standard requests.
+- Contact Channels:
+  - Slack Channel: #it-helpdesk
+  - Internal Portal: https://servicedesk.novatech-internal.com
+  - Emergency Hotline: +1 (800) 555-NOVA (Ext. 4357)
+
+7. KNOWLEDGE BASE BOUNDARIES & LIMITATIONS
+- This internal document covers only internal company operations, policies, hardware, and IT infrastructure.
+- Real-time public information, stock prices, external news, celebrity trivia, and general world facts are outside the scope of this private knowledge base.

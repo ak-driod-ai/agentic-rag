@@ -1,0 +1,8 @@
+langgraph
+langchain-groq
+langchain-core
+qdrant-client
+sentence-transformers
+tavily-python
+python-dotenv
+pydantic
