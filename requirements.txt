@@ -6,3 +6,6 @@ sentence-transformers
 tavily-python
 python-dotenv
 pydantic
+fastapi
+uvicorn
+sse-starlette

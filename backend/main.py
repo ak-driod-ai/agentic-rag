@@ -69,7 +69,21 @@ def display_result(result: dict):
     print("=" * 60 + "\n")
 
 
+def serve():
+    import uvicorn
+    print("\n" + "=" * 60)
+    print(" 🚀 Starting Agentic RAG FastAPI Streaming Server")
+    print(" 🌐 Web UI & Live Stream:  http://127.0.0.1:8000")
+    print(" 📘 Interactive API Docs:  http://127.0.0.1:8000/docs")
+    print("=" * 60 + "\n")
+    uvicorn.run("backend.api:app", host="127.0.0.1", port=8000, reload=False)
+
+
 def main():
+    if "--serve" in sys.argv or "--api" in sys.argv:
+        serve()
+        return
+
     print("=" * 60)
     print(" Novatech Agentic RAG Assistant (LangGraph + Groq + Qdrant + Tavily)")
     print("=" * 60)
