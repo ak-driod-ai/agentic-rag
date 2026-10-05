@@ -2,9 +2,11 @@ from langgraph.graph import (
     StateGraph,
     END
 )
+from langgraph.checkpoint.memory import MemorySaver
 
 from .state import AgentState
 from .nodes import (
+    contextualize_query,
     route_question,
     direct_answer,
     retrieve_private_docs,
@@ -76,10 +78,11 @@ def web_grade_decision(state: AgentState) -> str:
 # BUILD AGENTIC RAG GRAPH
 # ==========================================
 
-def build_graph():
+def build_graph(use_memory: bool = True):
     workflow = StateGraph(AgentState)
 
     # 1. Add Nodes
+    workflow.add_node("contextualize_query", contextualize_query)
     workflow.add_node("route_question", route_question)
     workflow.add_node("direct_answer", direct_answer)
     workflow.add_node("retrieve_private_docs", retrieve_private_docs)
@@ -91,8 +94,9 @@ def build_graph():
     workflow.add_node("generate_web", generate_from_web)
     workflow.add_node("insufficient", insufficient_answer)
 
-    # 2. Entry Point
-    workflow.set_entry_point("route_question")
+    # 2. Entry Point -> Contextualize Query First
+    workflow.set_entry_point("contextualize_query")
+    workflow.add_edge("contextualize_query", "route_question")
 
     # 3. Router Conditional Edge
     workflow.add_conditional_edges(
@@ -144,4 +148,5 @@ def build_graph():
     workflow.add_edge("generate_web", END)
     workflow.add_edge("insufficient", END)
 
-    return workflow.compile()
+    checkpointer = MemorySaver() if use_memory else None
+    return workflow.compile(checkpointer=checkpointer)

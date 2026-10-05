@@ -1,38 +1,40 @@
-from typing import TypedDict
+from typing import TypedDict, List, Dict, Any
 
 
 class AgentState(TypedDict, total=False):
+    # Multi-turn conversation history
+    chat_history: List[Dict[str, str]]
 
-    # Original user question
+    # Original user question in current turn
     question: str
 
-    # Query currently being used for retrieval
+    # Contextualized/rewritten query used for retrieval
     current_query: str
 
-    # Router decision
+    # Router decision: "direct_answer" vs "retrieve_kb"
     route: str
 
-    # Private KB documents
+    # Private KB documents from Qdrant
     private_docs: list
 
-    # Tavily results
+    # Web search results from Tavily
     web_results: list
 
-    # Evaluation results
+    # Evaluation results: "good" vs "weak"
     kb_grade: str
     web_grade: str
 
-    # Number of rewrites
+    # Number of query rewrites attempted
     retry_count: int
 
-    # Final response
+    # Final synthesized answer
     answer: str
 
-    # Where answer came from
+    # Source attribution (Private KB, Web, Direct)
     source_used: str
 
-    # URLs / source references
+    # List of citation strings or URLs
     sources: list
 
-    # Explain agent decisions
+    # Step-by-step decision log
     decision_trace: list

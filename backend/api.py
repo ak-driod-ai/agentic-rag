@@ -1,4 +1,5 @@
 import json
+import uuid
 import asyncio
 from typing import AsyncGenerator, Optional
 from pydantic import BaseModel, Field
@@ -12,8 +13,8 @@ from .ingest import ingest
 
 app = FastAPI(
     title="Agentic RAG API",
-    description="Production FastAPI endpoint with LangGraph real-time streaming, decision tracing, and knowledge base routing.",
-    version="1.0.0"
+    description="Production FastAPI endpoint with LangGraph real-time streaming, multi-turn conversational memory, and knowledge base routing.",
+    version="1.1.0"
 )
 
 # Enable CORS for frontend integration
@@ -32,9 +33,11 @@ app.add_middleware(
 
 class QueryRequest(BaseModel):
     question: str = Field(..., example="How do I connect to NovaRetail VPN?")
+    thread_id: Optional[str] = Field(None, example="user_session_123")
 
 
 class QueryResponse(BaseModel):
+    thread_id: str
     question: str
     answer: str
     source_used: str
@@ -51,10 +54,10 @@ class IngestResponse(BaseModel):
 # STREAMING GENERATOR
 # ==========================================
 
-async def event_generator(question: str) -> AsyncGenerator[str, None]:
+async def event_generator(question: str, thread_id: str = "default_session") -> AsyncGenerator[str, None]:
     """
     Streams LangGraph execution events step-by-step using Server-Sent Events (SSE).
-    Emits node completion events and the final synthesized response.
+    Preserves multi-turn state across sequential turns using the thread_id checkpointer.
     """
     agent = get_agent()
     initial_state = {
@@ -67,25 +70,27 @@ async def event_generator(question: str) -> AsyncGenerator[str, None]:
         "decision_trace": []
     }
 
+    config = {"configurable": {"thread_id": thread_id}}
     final_state = dict(initial_state)
 
     try:
-        # Initial event
-        yield f"event: start\ndata: {json.dumps({'message': 'Agent graph initialized', 'question': question})}\n\n"
+        # Initial start event
+        yield f"event: start\ndata: {json.dumps({'message': 'Agent graph initialized', 'thread_id': thread_id, 'question': question})}\n\n"
         await asyncio.sleep(0.01)
 
         # Stream node-by-node updates from LangGraph
-        async for output in agent.astream(initial_state, stream_mode="updates"):
+        async for output in agent.astream(initial_state, config=config, stream_mode="updates"):
             for node_name, node_update in output.items():
-                # Merge updates into final state
                 final_state.update(node_update)
 
                 trace_list = node_update.get("decision_trace", [])
                 latest_trace = trace_list[-1] if trace_list else f"Executed node: {node_name}"
 
                 payload = {
+                    "thread_id": thread_id,
                     "node": node_name,
                     "trace": latest_trace,
+                    "current_query": node_update.get("current_query"),
                     "route": node_update.get("route"),
                     "kb_grade": node_update.get("kb_grade"),
                     "web_grade": node_update.get("web_grade"),
@@ -97,6 +102,7 @@ async def event_generator(question: str) -> AsyncGenerator[str, None]:
 
         # Final result event
         result_payload = {
+            "thread_id": thread_id,
             "question": question,
             "answer": final_state.get("answer", "No answer generated."),
             "source_used": final_state.get("source_used", "N/A"),
@@ -107,7 +113,7 @@ async def event_generator(question: str) -> AsyncGenerator[str, None]:
         yield "event: done\ndata: [DONE]\n\n"
 
     except Exception as e:
-        error_payload = {"error": str(e)}
+        error_payload = {"error": str(e), "thread_id": thread_id}
         yield f"event: error\ndata: {json.dumps(error_payload)}\n\n"
 
 
@@ -118,20 +124,22 @@ async def event_generator(question: str) -> AsyncGenerator[str, None]:
 @app.get("/health", tags=["Health"])
 def health_check():
     """Returns the service operational health status."""
-    return {"status": "ok", "service": "Agentic RAG Assistant API"}
+    return {"status": "ok", "service": "Agentic RAG Assistant API", "memory_enabled": True}
 
 
 @app.post("/api/query", response_model=QueryResponse, tags=["RAG Query"])
 def query_agent(payload: QueryRequest):
     """
-    Standard synchronous query endpoint.
-    Executes the full Agentic RAG graph and returns the complete JSON response.
+    Standard synchronous query endpoint with multi-turn memory.
     """
     if not payload.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-    result = run_agent(payload.question)
+    thread_id = payload.thread_id or str(uuid.uuid4())
+    result = run_agent(payload.question, thread_id=thread_id)
+
     return QueryResponse(
+        thread_id=thread_id,
         question=payload.question,
         answer=result.get("answer", "No answer generated."),
         source_used=result.get("source_used", "N/A"),
@@ -143,14 +151,15 @@ def query_agent(payload: QueryRequest):
 @app.post("/api/stream", tags=["Streaming RAG"])
 async def stream_agent_post(payload: QueryRequest):
     """
-    Server-Sent Events (SSE) streaming endpoint via POST.
-    Streams intermediate node decisions, retrieval progress, and final answer tokens.
+    Server-Sent Events (SSE) streaming endpoint via POST with multi-turn support.
     """
     if not payload.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
+    thread_id = payload.thread_id or str(uuid.uuid4())
+
     return StreamingResponse(
-        event_generator(payload.question),
+        event_generator(payload.question, thread_id=thread_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -161,15 +170,17 @@ async def stream_agent_post(payload: QueryRequest):
 
 
 @app.get("/api/stream", tags=["Streaming RAG"])
-async def stream_agent_get(question: str):
+async def stream_agent_get(question: str, thread_id: Optional[str] = None):
     """
-    Server-Sent Events (SSE) streaming endpoint via GET (browser EventSource friendly).
+    Server-Sent Events (SSE) streaming endpoint via GET.
     """
     if not question.strip():
         raise HTTPException(status_code=400, detail="Question query param is required.")
 
+    sess_id = thread_id or str(uuid.uuid4())
+
     return StreamingResponse(
-        event_generator(question),
+        event_generator(question, thread_id=sess_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -195,18 +206,18 @@ def trigger_ingest():
 
 
 # ==========================================
-# BUILT-IN MODERN WEB UI
+# BUILT-IN MODERN WEB UI (MULTI-TURN ENABLED)
 # ==========================================
 
 @app.get("/", response_class=HTMLResponse, tags=["Web UI"])
 def serve_ui():
-    """Serves a sleek, modern interactive chat interface with real-time SSE streaming graph visualizer."""
+    """Serves a sleek interactive chat interface with real-time SSE streaming and multi-turn memory."""
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Agentic RAG Assistant | Live Streaming</title>
+    <title>Agentic RAG Assistant | Multi-Turn Memory</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -219,18 +230,12 @@ def serve_ui():
             --primary: #3b82f6;
             --primary-glow: rgba(59, 130, 246, 0.35);
             --accent: #10b981;
-            --accent-warm: #f59e0b;
             --text-main: #f3f4f6;
             --text-muted: #9ca3af;
             --border: #374151;
-            --border-highlight: #4b5563;
         }
 
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
 
         body {
             font-family: 'Plus Jakarta Sans', sans-serif;
@@ -275,9 +280,19 @@ def serve_ui():
             color: #ffffff;
         }
 
+        .session-badge {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            background: rgba(255, 255, 255, 0.08);
+            padding: 0.25rem 0.6rem;
+            border-radius: 6px;
+            color: #93c5fd;
+            border: 1px solid var(--border);
+        }
+
         .header-actions {
             display: flex;
-            gap: 1rem;
+            gap: 0.75rem;
             align-items: center;
         }
 
@@ -291,6 +306,7 @@ def serve_ui():
             font-size: 0.85rem;
             font-weight: 500;
             transition: all 0.2s;
+            text-decoration: none;
         }
 
         .btn-secondary:hover {
@@ -389,9 +405,7 @@ def serve_ui():
             animation: spin 0.8s linear infinite;
         }
 
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
+        @keyframes spin { to { transform: rotate(360deg); } }
 
         .message-body {
             line-height: 1.7;
@@ -424,11 +438,6 @@ def serve_ui():
             color: #60a5fa;
             text-decoration: none;
             border: 1px solid var(--border);
-        }
-
-        .citation-item:hover {
-            border-color: var(--primary);
-            text-decoration: underline;
         }
 
         .input-bar {
@@ -469,9 +478,6 @@ def serve_ui():
             font-size: 0.95rem;
             cursor: pointer;
             transition: all 0.2s;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
         }
 
         .btn-send:hover:not(:disabled) {
@@ -479,15 +485,13 @@ def serve_ui():
             transform: translateY(-1px);
         }
 
-        .btn-send:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
+        .btn-send:disabled { opacity: 0.5; cursor: not-allowed; }
 
         .quick-queries {
             display: flex;
             gap: 0.5rem;
             flex-wrap: wrap;
+            align-items: center;
         }
 
         .quick-btn {
@@ -513,9 +517,11 @@ def serve_ui():
     <header>
         <div class="brand">
             <div class="brand-badge">AGENTIC RAG</div>
-            <div class="brand-title">Novatech Assistant API</div>
+            <div class="brand-title">Novatech Assistant</div>
+            <span class="session-badge" id="sessionBadge">Thread: init</span>
         </div>
         <div class="header-actions">
+            <button class="btn-secondary" onclick="startNewChat()">🔄 New Chat</button>
             <button class="btn-secondary" onclick="reindexKnowledgeBase()">⚡ Re-index KB</button>
             <a href="/docs" target="_blank" class="btn-secondary">📘 OpenAPI Docs</a>
         </div>
@@ -523,30 +529,47 @@ def serve_ui():
 
     <main>
         <div class="quick-queries">
-            <span style="font-size: 0.8rem; color: var(--text-muted); align-self: center;">Try sample:</span>
-            <button class="quick-btn" onclick="setQuestion('How do I connect to NovaRetail VPN?')">🔒 Connect to VPN</button>
-            <button class="quick-btn" onclick="setQuestion('What is the password complexity requirement?')">🔑 Password Policy</button>
-            <button class="quick-btn" onclick="setQuestion('What are the latest updates about Python 3.13 features?')">🌐 Python 3.13 (Web)</button>
-            <button class="quick-btn" onclick="setQuestion('Hello, who are you?')">👋 Hello</button>
+            <span style="font-size: 0.8rem; color: var(--text-muted);">Try multi-turn flow:</span>
+            <button class="quick-btn" onclick="setQuestion('How do I connect to NovaRetail VPN?')">1️⃣ Connect to VPN</button>
+            <button class="quick-btn" onclick="setQuestion('What if that application fails?')">2️⃣ Follow-up: What if that fails?</button>
+            <button class="quick-btn" onclick="setQuestion('What are the password requirements?')">3️⃣ Password Policy</button>
         </div>
 
         <div class="chat-container" id="chatContainer">
             <div class="message-card assistant-message">
                 <div class="message-header">
-                    <span>AGENT READY</span>
-                    <span class="source-tag">LangGraph + Groq + Qdrant + Tavily</span>
+                    <span>AGENT READY (MULTI-TURN MEMORY ACTIVE)</span>
+                    <span class="source-tag">LangGraph MemorySaver</span>
                 </div>
-                <div class="message-body">Hello! I am your enterprise Agentic RAG assistant. Ask me anything about NovaRetail/Novatech internal IT policies, or general factual questions requiring real-time web research.</div>
+                <div class="message-body">Hello! I am your enterprise Agentic Assistant with persistent conversational memory. You can ask questions and follow up with natural pronouns like <i>"What if that app fails?"</i> or <i>"Tell me more about it."</i></div>
             </div>
         </div>
 
         <div class="input-bar">
-            <input type="text" id="queryInput" placeholder="Ask an enterprise IT or web question..." onkeydown="if(event.key==='Enter') sendStreamQuery()" />
+            <input type="text" id="queryInput" placeholder="Ask a question or follow-up in context..." onkeydown="if(event.key==='Enter') sendStreamQuery()" />
             <button class="btn-send" id="sendBtn" onclick="sendStreamQuery()">Send ➔</button>
         </div>
     </main>
 
     <script>
+        let currentThreadId = "session_" + Math.random().toString(36).substring(2, 9);
+        document.getElementById('sessionBadge').innerText = "Thread: " + currentThreadId;
+
+        function startNewChat() {
+            currentThreadId = "session_" + Math.random().toString(36).substring(2, 9);
+            document.getElementById('sessionBadge').innerText = "Thread: " + currentThreadId;
+            const chat = document.getElementById('chatContainer');
+            chat.innerHTML = `
+                <div class="message-card assistant-message">
+                    <div class="message-header">
+                        <span>NEW SESSION STARTED</span>
+                        <span class="source-tag">Memory Reset</span>
+                    </div>
+                    <div class="message-body">New session initialized (${currentThreadId}). How can I assist you today?</div>
+                </div>
+            `;
+        }
+
         function setQuestion(q) {
             document.getElementById('queryInput').value = q;
             sendStreamQuery();
@@ -580,7 +603,7 @@ def serve_ui():
             input.disabled = true;
             sendBtn.disabled = true;
 
-            // 1. Append User Card
+            // 1. User Message Card
             const userCard = document.createElement('div');
             userCard.className = 'message-card user-message';
             userCard.innerHTML = `
@@ -589,16 +612,16 @@ def serve_ui():
             `;
             chat.appendChild(userCard);
 
-            // 2. Append Assistant Streaming Card
+            // 2. Assistant Message Card
             const assistantCard = document.createElement('div');
             assistantCard.className = 'message-card assistant-message';
             assistantCard.innerHTML = `
                 <div class="message-header">
                     <span>AGENTIC GRAPH EXECUTION</span>
-                    <span class="source-tag" id="sourceBadge">Executing...</span>
+                    <span class="source-tag" id="sourceBadge">Contextualizing...</span>
                 </div>
                 <div class="steps-container" id="stepsBox">
-                    <div class="step-item"><div class="step-spinner"></div> Initializing graph pipeline...</div>
+                    <div class="step-item"><div class="step-spinner"></div> Resolving context & memory...</div>
                 </div>
                 <div class="message-body" id="answerBox">Thinking...</div>
                 <div class="citations-box" id="citationsBox" style="display:none;">
@@ -619,7 +642,7 @@ def serve_ui():
                 const response = await fetch('/api/stream', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ question })
+                    body: JSON.stringify({ question, thread_id: currentThreadId })
                 });
 
                 const reader = response.body.getReader();
@@ -632,7 +655,7 @@ def serve_ui():
 
                     buffer += decoder.decode(value, { stream: true });
                     const lines = buffer.split('\\n\\n');
-                    buffer = lines.pop(); // Keep last partial line in buffer
+                    buffer = lines.pop();
 
                     for (const block of lines) {
                         if (!block.trim()) continue;
@@ -673,7 +696,6 @@ def serve_ui():
                 input.disabled = false;
                 sendBtn.disabled = false;
                 input.focus();
-                // Remove spinner
                 const spinner = stepsBox.querySelector('.step-spinner');
                 if (spinner) spinner.parentElement.remove();
             }

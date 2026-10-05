@@ -1,5 +1,6 @@
 import sys
 import os
+import uuid
 
 # Ensure UTF-8 output encoding across Windows terminals
 if hasattr(sys.stdout, "reconfigure"):
@@ -18,15 +19,15 @@ _agent_graph = None
 def get_agent():
     global _agent_graph
     if _agent_graph is None:
-        _agent_graph = build_graph()
+        _agent_graph = build_graph(use_memory=True)
     return _agent_graph
 
 
-def run_agent(question: str) -> dict:
-    """Executes the Agentic RAG graph with a user question."""
+def run_agent(question: str, thread_id: str = "default_session") -> dict:
+    """Executes the Agentic RAG graph with multi-turn memory support."""
     agent = get_agent()
 
-    initial_state = {
+    input_state = {
         "question": question,
         "current_query": question,
         "retry_count": 0,
@@ -36,7 +37,8 @@ def run_agent(question: str) -> dict:
         "decision_trace": []
     }
 
-    result = agent.invoke(initial_state)
+    config = {"configurable": {"thread_id": thread_id}}
+    result = agent.invoke(input_state, config=config)
     return result
 
 
@@ -72,7 +74,7 @@ def display_result(result: dict):
 def serve():
     import uvicorn
     print("\n" + "=" * 60)
-    print(" 🚀 Starting Agentic RAG FastAPI Streaming Server")
+    print(" 🚀 Starting Agentic RAG FastAPI Streaming Server (Multi-Turn Enabled)")
     print(" 🌐 Web UI & Live Stream:  http://127.0.0.1:8000")
     print(" 📘 Interactive API Docs:  http://127.0.0.1:8000/docs")
     print("=" * 60 + "\n")
@@ -85,7 +87,7 @@ def main():
         return
 
     print("=" * 60)
-    print(" Novatech Agentic RAG Assistant (LangGraph + Groq + Qdrant + Tavily)")
+    print(" Novatech Agentic RAG Assistant (LangGraph + Multi-Turn Memory)")
     print("=" * 60)
 
     # Ensure KB is loaded
@@ -98,12 +100,15 @@ def main():
         display_result(result)
         return
 
+    session_thread_id = str(uuid.uuid4())
+    print(f"[*] Started multi-turn chat session: {session_thread_id[:8]}")
+
     while True:
         try:
             question = input("\nAsk a question (or type 'exit' to quit): ").strip()
             if not question or question.lower() in ["exit", "quit", "q"]:
                 break
-            result = run_agent(question)
+            result = run_agent(question, thread_id=session_thread_id)
             display_result(result)
         except (KeyboardInterrupt, EOFError):
             print("\nExiting...")

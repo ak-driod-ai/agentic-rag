@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from .llm import get_llm
 from .qdrant_store import search_documents
@@ -44,12 +44,66 @@ def clean_json_response(content: Any) -> str:
     return text
 
 
+def update_chat_history(state: Dict[str, Any], answer: str) -> List[Dict[str, str]]:
+    """Appends current turn's user question and assistant answer to multi-turn history."""
+    history = list(state.get("chat_history", []))
+    history.append({"role": "user", "content": state.get("question", "")})
+    history.append({"role": "assistant", "content": answer})
+    return history
+
+
 # ==========================================
-# 1. ROUTER NODE
+# 1. CONTEXTUALIZE / REPHRASE QUERY NODE
+# ==========================================
+
+def contextualize_query(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Rephrases follow-up questions into standalone queries using conversation history.
+    Example: 'What if that fails?' -> 'What if the RemoteConnect VPN application fails?'
+    """
+    question = state["question"]
+    history = state.get("chat_history", [])
+
+    if not history:
+        state["current_query"] = question
+        return state
+
+    history_text = "\n".join([
+        f"{msg.get('role', 'user').capitalize()}: {msg.get('content', '')}"
+        for msg in history[-6:]
+    ])
+
+    llm = get_llm()
+    prompt = f"""Given the following conversation history and a follow-up question, rephrase the follow-up question into an unambiguous, standalone search query that incorporates any referenced entities, policies, or context from previous turns.
+Do NOT answer the question. Return ONLY the standalone rephrased query string.
+
+Conversation History:
+{history_text}
+
+Follow-up Question: {question}
+
+Standalone Query:"""
+
+    response = llm.invoke(prompt)
+    standalone_query = clean_text_response(response.content).replace('"', '').replace("'", "").strip()
+    if not standalone_query:
+        standalone_query = question
+
+    state["current_query"] = standalone_query
+    if standalone_query.lower() != question.lower():
+        state["decision_trace"] = add_trace(
+            state,
+            f"Multi-turn Query Contextualized: '{question}' -> '{standalone_query}'"
+        )
+    return state
+
+
+# ==========================================
+# 2. ROUTER NODE
 # ==========================================
 
 def route_question(state: Dict[str, Any]) -> Dict[str, Any]:
-    question = state["question"]
+    question = state.get("current_query", state["question"])
     llm = get_llm()
 
     prompt = f"""You are an intelligent query router for an enterprise Agentic RAG system for Novatech / NovaRetail.
@@ -84,7 +138,6 @@ User Question:
         if route not in ["direct_answer", "retrieve_kb"]:
             route = "retrieve_kb"
     except Exception:
-        # Fallback keyword heuristic
         lower_q = question.lower().strip()
         if lower_q in ["hi", "hello", "hey", "how are you", "who are you"]:
             route = "direct_answer"
@@ -92,36 +145,46 @@ User Question:
             route = "retrieve_kb"
 
     state["route"] = route
-    state["current_query"] = question
     state["retry_count"] = state.get("retry_count", 0)
-    state["decision_trace"] = add_trace(state, f"Router Decision: {route} (Question: '{question}')")
+    state["decision_trace"] = add_trace(state, f"Router Decision: {route} (Query: '{question}')")
     return state
 
 
 # ==========================================
-# 2. DIRECT ANSWER NODE
+# 3. DIRECT ANSWER NODE
 # ==========================================
 
 def direct_answer(state: Dict[str, Any]) -> Dict[str, Any]:
     question = state["question"]
+    history = state.get("chat_history", [])
     llm = get_llm()
+
+    history_text = ""
+    if history:
+        history_text = "Conversation History:\n" + "\n".join([
+            f"{msg.get('role', 'user').capitalize()}: {msg.get('content', '')}"
+            for msg in history[-4:]
+        ]) + "\n\n"
 
     prompt = f"""You are a helpful and professional AI assistant for Novatech/NovaRetail.
 Respond directly and concisely to the user's conversational greeting or general knowledge question.
 
-User Question: {question}
+{history_text}User Question: {question}
 """
 
     response = llm.invoke(prompt)
-    state["answer"] = clean_text_response(response.content)
+    answer = clean_text_response(response.content)
+
+    state["answer"] = answer
     state["source_used"] = "Direct LLM Response"
     state["sources"] = []
+    state["chat_history"] = update_chat_history(state, answer)
     state["decision_trace"] = add_trace(state, "Generated direct answer via LLM without document retrieval.")
     return state
 
 
 # ==========================================
-# 3. RETRIEVE PRIVATE KB NODE
+# 4. RETRIEVE PRIVATE KB NODE
 # ==========================================
 
 def retrieve_private_docs(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -137,12 +200,12 @@ def retrieve_private_docs(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ==========================================
-# 4. GRADE PRIVATE KB NODE
+# 5. GRADE PRIVATE KB NODE
 # ==========================================
 
 def grade_private_docs(state: Dict[str, Any]) -> Dict[str, Any]:
     documents = state.get("private_docs", [])
-    question = state["question"]
+    query = state.get("current_query", state["question"])
 
     if not documents:
         state["kb_grade"] = "weak"
@@ -156,8 +219,8 @@ def grade_private_docs(state: Dict[str, Any]) -> Dict[str, Any]:
 
 Determine whether the retrieved internal documentation contains sufficient, relevant facts to answer the user's question accurately.
 
-User Question:
-{question}
+User Question / Query:
+{query}
 
 Retrieved Private Documentation:
 {context}
@@ -187,23 +250,32 @@ If the documents are irrelevant or do NOT provide sufficient information to answ
 
 
 # ==========================================
-# 5. GENERATE FROM PRIVATE KB NODE
+# 6. GENERATE FROM PRIVATE KB NODE
 # ==========================================
 
 def generate_from_private_kb(state: Dict[str, Any]) -> Dict[str, Any]:
     question = state["question"]
+    query = state.get("current_query", question)
     documents = state.get("private_docs", [])
+    history = state.get("chat_history", [])
+
+    history_text = ""
+    if history:
+        history_text = "Recent Conversation History:\n" + "\n".join([
+            f"{msg.get('role', 'user').capitalize()}: {msg.get('content', '')}"
+            for msg in history[-4:]
+        ]) + "\n\n"
 
     context = "\n\n".join([f"Source [{doc.get('source', 'internal_doc')}]:\n{doc.get('text', '')}" for doc in documents])
     llm = get_llm()
 
     prompt = f"""You are the internal IT and Knowledge Assistant for Novatech / NovaRetail.
 
-Answer the employee's question accurately and professionally using ONLY the provided private company knowledge base excerpts.
+Answer the employee's question accurately, maintaining natural conversational continuity with previous turns if applicable, using ONLY the provided private company knowledge base excerpts.
 Do not hallucinate facts outside the provided documentation.
 
-Question:
-{question}
+{history_text}Current Question:
+{question} (Context Query: {query})
 
 Private Knowledge Excerpts:
 {context}
@@ -212,18 +284,20 @@ Provide a clear, well-structured answer:
 """
 
     response = llm.invoke(prompt)
-    state["answer"] = clean_text_response(response.content)
+    answer = clean_text_response(response.content)
+
+    state["answer"] = answer
     state["source_used"] = "Private Knowledge Base (Novatech / NovaRetail)"
 
-    # Extract distinct source document names
     sources = list({doc.get("source", "nova_it_handbook.txt") for doc in documents if doc.get("source")})
     state["sources"] = sources if sources else ["nova_it_handbook.txt"]
+    state["chat_history"] = update_chat_history(state, answer)
     state["decision_trace"] = add_trace(state, "Generated final response from Private Knowledge Base.")
     return state
 
 
 # ==========================================
-# 6. RETRIEVE WEB SEARCH NODE (TAVILY)
+# 7. RETRIEVE WEB SEARCH NODE (TAVILY)
 # ==========================================
 
 def retrieve_web(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -239,12 +313,12 @@ def retrieve_web(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ==========================================
-# 7. GRADE WEB RESULTS NODE
+# 8. GRADE WEB RESULTS NODE
 # ==========================================
 
 def grade_web_results(state: Dict[str, Any]) -> Dict[str, Any]:
     results = state.get("web_results", [])
-    question = state["question"]
+    query = state.get("current_query", state["question"])
 
     if not results:
         state["web_grade"] = "weak"
@@ -258,8 +332,8 @@ def grade_web_results(state: Dict[str, Any]) -> Dict[str, Any]:
 
 Determine whether the retrieved web search results contain adequate and relevant information to address the user's question.
 
-User Question:
-{question}
+User Question / Query:
+{query}
 
 Web Search Results:
 {context}
@@ -289,12 +363,21 @@ If the search results are irrelevant, empty, or unhelpful:
 
 
 # ==========================================
-# 8. GENERATE FROM WEB SEARCH NODE
+# 9. GENERATE FROM WEB SEARCH NODE
 # ==========================================
 
 def generate_from_web(state: Dict[str, Any]) -> Dict[str, Any]:
     question = state["question"]
+    query = state.get("current_query", question)
     results = state.get("web_results", [])
+    history = state.get("chat_history", [])
+
+    history_text = ""
+    if history:
+        history_text = "Recent Conversation History:\n" + "\n".join([
+            f"{msg.get('role', 'user').capitalize()}: {msg.get('content', '')}"
+            for msg in history[-4:]
+        ]) + "\n\n"
 
     context = "\n\n".join([
         f"Title: {r.get('title', 'N/A')}\nURL: {r.get('url', '')}\nContent: {r.get('content', '')}"
@@ -303,11 +386,11 @@ def generate_from_web(state: Dict[str, Any]) -> Dict[str, Any]:
 
     llm = get_llm()
     prompt = f"""You are an AI research assistant.
-Answer the user's question clearly and accurately based on the provided web search evidence.
+Answer the user's question clearly, maintaining natural conversation continuity, based on the provided web search evidence.
 Include relevant context and cite facts properly.
 
-Question:
-{question}
+{history_text}Question:
+{question} (Query: {query})
 
 Web Search Findings:
 {context}
@@ -316,18 +399,20 @@ Synthesize a concise, factual answer:
 """
 
     response = llm.invoke(prompt)
-    state["answer"] = clean_text_response(response.content)
+    answer = clean_text_response(response.content)
+
+    state["answer"] = answer
     state["source_used"] = "Tavily Web Search"
 
-    # Extract clean list of unique URLs
     urls = [r["url"] for r in results if r.get("url")]
     state["sources"] = list(dict.fromkeys(urls))
+    state["chat_history"] = update_chat_history(state, answer)
     state["decision_trace"] = add_trace(state, "Generated final response from Tavily Web Search evidence.")
     return state
 
 
 # ==========================================
-# 9. REWRITE QUERY NODE (FOR WEB SEARCH)
+# 10. REWRITE QUERY NODE (FOR WEB SEARCH)
 # ==========================================
 
 def rewrite_query(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -359,20 +444,22 @@ Return ONLY the rewritten search query string. Do not include quotes, preamble, 
 
 
 # ==========================================
-# 10. INSUFFICIENT EVIDENCE / FALLBACK NODE
+# 11. INSUFFICIENT EVIDENCE / FALLBACK NODE
 # ==========================================
 
 def insufficient_answer(state: Dict[str, Any]) -> Dict[str, Any]:
     question = state["question"]
     retry_count = state.get("retry_count", 0)
 
-    state["answer"] = (
+    answer = (
         f"I was unable to find sufficient or verified information to answer your question: '{question}'. "
         f"Judgement: The private Novatech knowledge base contains no matching records, "
         f"and external web search (including {retry_count} query refinement retry) did not yield conclusive evidence."
     )
+    state["answer"] = answer
     state["source_used"] = "Insufficient Evidence (Private KB & Web Exhausted)"
     state["sources"] = []
+    state["chat_history"] = update_chat_history(state, answer)
     state["decision_trace"] = add_trace(
         state,
         "Exhausted retrieval attempts (Private KB + Web Search with rewrite). Returning insufficient evidence verdict."
